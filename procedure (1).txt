@@ -1,0 +1,565 @@
+create or replace PROCEDURE prc_lr_detail_data_beyond (
+    v_company_id      IN CHAR,
+    v_from_date       IN DATE,
+    v_to_date         IN DATE,
+    excise_invoice_no IN VARCHAR,
+    lr_no             IN NUMBER
+) AS
+
+    exceptionerr EXCEPTION;
+    v_jobname      joblog.jobname%TYPE := 'Error in LR Detail Data Procedure';
+    errmsg         CHAR(200) := ' ';
+    v_totalrecords NUMBER(5);
+BEGIN
+    DELETE FROM lr_detail_data1
+    WHERE
+            company_id = v_company_id
+        AND lr_date BETWEEN v_from_date AND v_to_date
+        AND owner_division_id <> '11'
+        AND created_by NOT LIKE 'DIST%';
+
+    v_totalrecords := 0;
+    FOR k IN (
+        SELECT
+            lr.company_id,
+            lr.transporter_id,
+            lr.lr_no,
+            lr.lr_date,
+            lr.consignee_id,
+            lr.owner_division_id,
+            lr.invoice_no,
+            lr.invoice_date,
+            lr.destination_id,
+            lr.region_id,
+            lr.gross_weight                                  lr_gross_weight,
+            (
+                SELECT /*+ INDEX_ASC (ih AK_INSPECTION_HEADER_2) */
+                    nvl(SUM(ih.gross_weight),
+                        0) gross_weight
+                FROM
+                    inspection_header ih
+                WHERE
+                        ih.company_id = iv.company_id
+                    AND ih.excise_invoice_no = iv.excise_invoice_no
+            ) + (
+                SELECT /*+ INDEX_ASC (ih AK_CHL_INSPECTION_HEADER_2) */
+                    nvl(SUM(ih.gross_weight),
+                        0) gross_weight
+                FROM
+                    challan_inspection_header ih
+                WHERE
+                        ih.company_id = iv.company_id
+                    AND ih.excise_invoice_no = iv.excise_invoice_no
+            ) + (
+                SELECT
+                    nvl(SUM(ih.gross_weight),
+                        0) gross_weight
+                FROM
+                    cut_box_detail ih
+                WHERE
+                        ih.company_id = iv.company_id
+                    AND ih.excise_invoice_no = iv.excise_invoice_no
+            )                                                gross_weight,
+            round(lr.lr_freight_amount / lr.gross_weight, 4) transporter_rate,
+            0                                                lr_other_amount,
+            lr.pay_topay                                     pay_flag,
+            (
+                SELECT /*+ INDEX_ASC (ih AK_DISPATCH_ADVICE_HEADER_2) */
+                    nvl(MAX(da.fabric_type_id),
+                        ' ')
+                FROM
+                    dispatch_advice_header da
+                WHERE
+                        da.company_id = iv.company_id
+                    AND da.excise_invoice_no = iv.excise_invoice_no
+            )                                                product,
+            TRIM(iv.excise_invoice_no)                       excise_invoice_no,
+            iv.invoice_date                                  excise_invoice_date,
+            (
+                SELECT /*+ INDEX_ASC (ih AK_INSPECTION_HEADER_2) */
+                    nvl(SUM(ih.roll_length),
+                        0) roll_length
+                FROM
+                    inspection_header ih
+                WHERE
+                        ih.company_id = iv.company_id
+                    AND ih.excise_invoice_no = iv.excise_invoice_no
+            ) + (
+                SELECT /*+ INDEX_ASC (ih AK_CHL_INSPECTION_HEADER_2) */
+                    nvl(SUM(ih.roll_length),
+                        0) roll_length
+                FROM
+                    challan_inspection_header ih
+                WHERE
+                        ih.company_id = iv.company_id
+                    AND ih.excise_invoice_no = iv.excise_invoice_no
+            ) + (
+                SELECT
+                    nvl(SUM((ih.total_pcs * cd.meter_ratio)),
+                        0) roll_length
+                FROM
+                    bundle_request ih,
+                    cut_detail     cd
+                WHERE
+                        ih.company_id = iv.company_id
+                    AND ih.excise_invoice_no = iv.excise_invoice_no
+                    AND cd.company_id = ih.company_id
+                    AND cd.inward_no = ih.inward_no
+                    AND cd.inward_line_no = ih.inward_line_no
+            )                                                quantity_meters,
+            iv.excise_invoice_amount,
+            iv.invoice_amount_rs,
+            (
+                SELECT /*+ INDEX_ASC (ih AK_DISPATCH_ADVICE_HEADER_2) */
+                    nvl(MAX(da.manager_id),
+                        ' ') manager_id
+                FROM
+                    dispatch_advice_header da
+                WHERE
+                        da.company_id = iv.company_id
+                    AND da.excise_invoice_no = iv.excise_invoice_no
+            )                                                manager_id,
+            (
+                SELECT /*+ INDEX_ASC (ih AK_DISPATCH_ADVICE_HEADER_2) */
+                    MAX(da.freight_terms_id)
+                FROM
+                    dispatch_advice_header da
+                WHERE
+                        da.company_id = iv.company_id
+                    AND da.excise_invoice_no = iv.excise_invoice_no
+            )                                                freight_term_id,
+            ' '                                              segment_id,
+            (
+                SELECT /*+ INDEX_ASC (ih AK_DISPATCH_ADVICE_HEADER_2) */
+                    MAX(da.shipment_id)
+                FROM
+                    dispatch_advice_header da
+                WHERE
+                        da.company_id = iv.company_id
+                    AND da.excise_invoice_no = iv.excise_invoice_no
+            )                                                shipment_id,
+            ' '                                              sys_transporter_id,
+            0                                                sys_transporter_rate,
+            0                                                other_amount,
+            'MIS',
+            sysdate
+        FROM
+            lr_header             lr,
+            invoice_header        iv,
+            suppliermaster        sm,
+            customermaster        cm,
+            transporterdepomaster ct,
+            regionmaster          rm,
+            ownerdivisionmaster   ow
+        WHERE
+                lr.company_id = v_company_id
+            AND lr.lr_date BETWEEN v_from_date AND v_to_date
+            AND upper(substr(lr.lr_no, 1, 4)) <> 'GRTN'
+				--AND IV.Excise_Invoice_No = 'ALDMF01495/2223'
+            AND iv.company_id = lr.company_id
+            AND iv.lr_no = lr.lr_no
+            AND to_char(iv.invoice_date, 'YYYY') = to_char(lr.lr_date, 'YYYY')
+            AND iv.lr_date = lr.lr_date
+            AND iv.transporter_id = lr.transporter_id
+            AND sm.company_id = lr.company_id
+            AND sm.supplier_id = lr.transporter_id
+            AND cm.company_id = lr.company_id
+            AND cm.customer_id = lr.consignee_id
+            AND ct.company_id = lr.company_id
+            AND ct.city_id = lr.destination_id
+            AND ct.area_id = lr.area_id
+            AND rm.company_id = lr.company_id
+            AND rm.region_id = lr.region_id
+            AND ow.company_id = lr.company_id
+            AND ow.owner_division_id = lr.owner_division_id
+        ORDER BY
+            lr.lr_no,
+            lr.lr_date
+    ) LOOP
+     INSERT INTO lr_detail_data1 (
+            company_id,
+            transporter_id,
+            lr_no,
+            lr_date,
+            consignee_id,
+            owner_division_id,
+            invoice_no,
+            invoice_date,
+            destination_id,
+            region_id,
+            gross_weight,
+            lr_freight_amount,
+            lr_other_amount,
+            pay_topay_flag,
+            fabric_type_id,
+            excise_invoice_no,
+            quantity_meters,
+            excise_invoice_amount,
+            invoice_amount_rs,
+            manager_id,
+            da_freight_terms,
+            segment_id,
+            shipment_id,
+            sys_transporter_id,
+            sys_transporter_rate,
+            other_amount,
+            created_by,
+            created_date,
+            excise_invoice_date
+            
+        ) VALUES (
+            k.company_id,
+            k.transporter_id,
+            k.lr_no,
+            k.lr_date,
+            k.consignee_id,
+            k.owner_division_id,
+            k.invoice_no,
+            k.invoice_date,
+            k.destination_id,
+            k.region_id,
+            k.gross_weight, 
+            round(k.gross_weight * k.transporter_rate, 2),
+            0,
+            k.pay_flag,
+            k.product,
+            k.excise_invoice_no,
+            k.quantity_meters,
+            k.excise_invoice_amount,
+            k.invoice_amount_rs,
+            k.manager_id,
+            k.freight_term_id,
+            k.segment_id,
+            k.shipment_id,
+            ' ',
+            0,
+            0,
+            'DYECOT',
+            sysdate,
+            k.excise_invoice_date
+        );
+
+v_totalrecords := v_totalrecords + 1;
+
+			--DBMS_OUTPUT.PUT_LINE('Current record ' || V_TotalRecords);
+
+			--DBMS_OUTPUT.PUT_LINE('RECORD INSERTED');
+
+        FOR n IN (
+				--SELECT A.LR_No, A.Transporter_ID, SUM(DECODE(C.PFU,'F',C.Exp_Value,'U',C.Exp_Value*A.Gross_Weight, 0)) LR_Other_Amount
+            SELECT
+                a.lr_no,
+                a.transporter_id,
+                SUM(
+                    CASE
+                        WHEN c.pfu = 'F' THEN
+                                CASE
+                                    WHEN(TRIM(c.expense_type) = 'DOOR DLY CHARGES'
+                                         AND TRIM(k.freight_term_id) = 'PDACC') THEN
+                                        0
+                                    ELSE
+                                        c.exp_value
+                                END
+                        WHEN c.pfu = 'U' THEN
+                                CASE
+                                    WHEN(TRIM(c.expense_type) = 'DOOR DLY CHARGES'
+                                         AND TRIM(k.freight_term_id) = 'PDACC') THEN
+                                        0
+                                    ELSE
+                                        c.exp_value * a.gross_weight
+                                END
+                        ELSE
+                            0
+                    END
+                ) lr_other_amount
+            FROM
+                lr_header                    a,
+                mtransporter_expenses@sfprod c
+            WHERE
+                    a.company_id = v_company_id
+				--AND A.LR_date BETWEEN V_FROM_DATE AND V_TO_DATE
+                AND a.lr_no = k.lr_no
+                AND c.division_id (+) = '33'
+                AND c.tcode (+) = a.transporter_id
+                AND a.gross_weight BETWEEN c.from_range (+) AND c.to_range (+)
+                AND a.lr_date BETWEEN c.from_date (+) AND c.to_date (+)
+            GROUP BY
+                a.lr_no,
+                a.transporter_id
+        ) LOOP
+            UPDATE lr_detail_data1
+            SET
+                lr_other_amount =
+                    CASE
+                        WHEN k.transporter_id = 'G001'
+                             AND k.destination_id = 'BAN' THEN
+                            0
+                        ELSE
+                            n.lr_other_amount
+                    END
+            WHERE
+                    company_id = k.company_id
+                AND TRIM(lr_no) = TRIM(n.lr_no)
+                AND TRIM(excise_invoice_no) = TRIM(k.excise_invoice_no);
+
+            dbms_output.put_line('Updated record ' || v_totalrecords);
+        END LOOP;
+
+			--Update Freight Rate and Amount
+        dbms_output.put_line('Now updating freight rate Start ' || k.excise_invoice_no);
+        dbms_output.put_line('Freight Loop Start ' || k.excise_invoice_no);
+        dbms_output.put_line('Freight Loop Start ' || v_company_id);
+        FOR frt IN (
+            SELECT
+                excise_invoice_no,
+                nvl(MAX(freight_rate),
+                    0) freight_rate
+            FROM
+                (
+                    SELECT
+                        a.excise_invoice_no,
+                        nvl(SUM(a.roll_length * c.freight_rs) / SUM(a.roll_length),
+                            0) freight_rate
+                    FROM
+                        challan_inspection_header a,
+                        order_detail              b,
+                        costsheet_add_on_detail   c
+                    WHERE
+                            a.company_id = v_company_id
+				--AND Trim(A.Excise_Invoice_No) = Trim(K.Excise_Invoice_No)
+                        AND a.excise_invoice_no = k.excise_invoice_no
+                        AND b.company_id = a.company_id
+                        AND b.order_no = a.order_no
+                        AND b.order_line_no = a.order_line_no
+                        AND c.company_id = b.company_id
+                        AND c.order_sheet_no = b.order_sheet_no
+                    GROUP BY
+                        a.excise_invoice_no
+                    UNION ALL
+                    SELECT
+                        a.excise_invoice_no,
+                        nvl(SUM(a.roll_length * c.freight_rs) / SUM(a.roll_length),
+                            0) freight_rate
+                    FROM
+                        inspection_header       a,
+                        order_detail            b,
+                        costsheet_add_on_detail c
+                    WHERE
+                            a.company_id = v_company_id
+				--AND Trim(A.Excise_Invoice_No) = Trim(K.Excise_Invoice_No)
+                        AND a.excise_invoice_no = k.excise_invoice_no
+                        AND b.company_id = a.company_id
+                        AND b.order_no = a.order_no
+                        AND b.order_line_no = a.order_line_no
+                        AND c.company_id = b.company_id
+                        AND c.order_sheet_no = b.order_sheet_no
+                    GROUP BY
+                        a.excise_invoice_no
+                )
+            GROUP BY
+                excise_invoice_no
+        ) LOOP
+
+--THIS BLCOK IS NOT WORKING
+                  dbms_output.put_line('Loop -FRT Freight Rate updation Start ' || k.excise_invoice_no);
+                  
+            UPDATE lr_detail_data1
+            SET
+                freight_rate_rs = frt.freight_rate,
+                freight_amount_rs = frt.freight_rate * k.quantity_meters
+				--WHERE Company_ID = V_Company_Id 
+				--And Trim(LR_No) = Trim(K.LR_No)
+				--AND Trim(Excise_Invoice_No) = Trim(FRT.Excise_Invoice_No);
+				--AND Trim(Excise_Invoice_No) = Trim(K.Excise_Invoice_No);
+
+            WHERE
+                    company_id = K.company_id
+                AND excise_invoice_no = k.excise_invoice_no;
+            
+            
+            dbms_output.put_line('Updated Freight Rate Rs. Record ' || v_totalrecords);
+
+--- THIS BLCOK IS NOT WORKING
+
+
+        END LOOP;
+			--End			  
+
+        FOR l IN (
+            SELECT
+                ROWNUM,
+                trans_code,
+                rate,
+                other_amount
+            FROM
+                (
+                    SELECT
+                        trans_code,
+                        MAX(rate) rate,
+                        nvl(SUM(exp_value),
+                            0)    other_amount
+                    FROM
+                        (
+                            SELECT
+                                a.transporter_id trans_code,
+                                b.name           trans_name,
+                                a.rate_kg        rate,
+                                c.expense_type,
+                                CASE
+                                    WHEN a.transporter_id = 'G001'
+                                         AND a.destination_id = 'BAN' THEN
+                                        0
+                                    ELSE
+                                        decode(c.pfu, 'F', c.exp_value, 'U', c.exp_value * k.lr_gross_weight,
+                                               0)
+                                END              exp_value
+                            FROM
+                                transporterratemaster        a,
+                                suppliermaster               b,
+                                mtransporter_expenses@sfprod c,
+                                shipmentmethodmaster         d
+                            WHERE
+                                    a.company_id = v_company_id
+                                AND b.company_id = a.company_id
+                                AND b.supplier_id = a.transporter_id
+                                AND b.allow_trans_invoice = 'Y'
+                                AND b.freeze_date IS NULL
+                                AND c.division_id (+) = '33'
+                                AND c.tcode (+) = a.transporter_id
+                                AND a.rate_kg > 0.10
+                                AND k.lr_gross_weight BETWEEN c.from_range (+) AND c.to_range (+)
+                                AND k.lr_date BETWEEN c.from_date (+) AND c.to_date (+)
+                                AND a.destination_id = k.destination_id
+                                AND trunc(a.from_date) <= k.lr_date
+                                AND trunc(a.to_date) >= k.lr_date
+                                AND a.from_kgs < k.lr_gross_weight
+                                AND a.to_kgs >= k.lr_gross_weight
+                                AND d.company_id (+) = k.company_id
+                                AND d.shipment_method_id (+) = k.shipment_id
+                                AND d.door_delivery_flag (+) = 'N'
+                                AND d.company_id (+) = b.company_id
+                                AND d.transport_mode (+) = b.mode_of_transport
+                        )
+                    GROUP BY
+                        trans_code,
+                        trans_name
+                    ORDER BY
+                        round((nvl(SUM(exp_value),
+                                   0) +(rate * k.lr_gross_weight)) / k.lr_gross_weight,
+                              2) ASC
+                )
+            WHERE
+                ROWNUM = 1
+        ) LOOP
+            UPDATE lr_detail_data1
+            SET
+                sys_transporter_id = l.trans_code,
+                sys_transporter_rate = l.rate,
+                other_amount = round(((k.gross_weight * l.other_amount) / k.lr_gross_weight), 2)
+            WHERE
+                    company_id = k.company_id
+                AND TRIM(lr_no) = TRIM(k.lr_no)
+                AND TRIM(excise_invoice_no) = TRIM(k.excise_invoice_no);
+
+            dbms_output.put_line('Loop -L Updated Transporter ID ' || v_totalrecords);
+
+--			DELETE FROM LR_EXPENSE_DETAIL_DATA WHERE COMPANY_ID='01' AND LR_NO=k.LR_NO ;
+            DELETE FROM lr_expense_detail_data
+            WHERE
+                    company_id = v_company_id
+                AND lr_date BETWEEN v_from_date AND v_to_date
+                AND owner_division_id <> '11'
+                AND lr_no = k.lr_no;
+
+            FOR m IN (
+                SELECT
+                    a.transporter_id trans_code,
+                    b.name           trans_name,
+                    a.rate_kg        rate,
+                    c.expense_type,
+                    decode(c.pfu, 'F', c.exp_value, 'U', c.exp_value * k.gross_weight,
+                           0)        exp_value
+                FROM
+                    transporterratemaster        a,
+                    suppliermaster               b,
+                    mtransporter_expenses@sfprod c
+                WHERE
+                        a.company_id = v_company_id
+                    AND b.company_id = a.company_id
+                    AND b.supplier_id = a.transporter_id
+                    AND b.allow_trans_invoice = 'Y'
+                    AND b.freeze_date IS NULL
+                    AND c.division_id (+) = '33'
+                    AND c.tcode (+) = a.transporter_id
+                    AND k.gross_weight BETWEEN c.from_range (+) AND c.to_range (+)
+                    AND k.lr_date BETWEEN c.from_date (+) AND c.to_date (+)
+                    AND a.destination_id = k.destination_id
+                    AND trunc(a.from_date) <= k.lr_date
+                    AND trunc(a.to_date) >= k.lr_date
+                    AND a.from_kgs < k.gross_weight
+                    AND a.to_kgs >= k.gross_weight
+                    AND a.transporter_id = l.trans_code
+                    AND decode(c.pfu, 'F', c.exp_value, 'U', c.exp_value * k.gross_weight,
+                               0) > 0
+            ) LOOP
+                IF trim(m.expense_type) <> NULL OR trim(m.expense_type) <> ' '
+                AND k.gross_weight > 0 THEN
+                    INSERT INTO lr_expense_detail_data (
+                        company_id,
+                        owner_division_id,
+                        lr_no,
+                        lr_date,
+                        transporer_id,
+                        excise_invoice_no,
+                        expense_type,
+                        exp_value
+                    ) VALUES (
+                        k.company_id,
+                        TRIM(k.owner_division_id),
+                        k.lr_no,
+                        k.lr_date,
+                        l.trans_code,
+                        TRIM(k.excise_invoice_no),
+                        nvl(m.expense_type, ' '),
+                        m.exp_value
+                    );
+
+                END IF;
+            END LOOP;
+
+        END LOOP;
+
+    END LOOP;	
+
+	--DBMS_OUTPUT.PUT_LINE('LR Details data procedure successfully executed');
+
+    INSERT INTO joblog VALUES (
+        sysdate,
+        'LR Detail Data Successfully Inserted',
+        1
+    );
+
+    COMMIT;
+EXCEPTION
+    WHEN exceptionerr THEN
+        ROLLBACK;
+        v_jobname := errmsg;
+        INSERT INTO joblog VALUES (
+            sysdate,
+            v_jobname,
+            9999
+        );
+
+        COMMIT;
+    WHEN OTHERS THEN
+        ROLLBACK;
+        errmsg := sqlerrm;
+        v_jobname := errmsg;
+        INSERT INTO joblog VALUES (
+            sysdate,
+            v_jobname,
+            9999
+        );
+
+        COMMIT;
+END;
